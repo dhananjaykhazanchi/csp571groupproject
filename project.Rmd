@@ -1,0 +1,256 @@
+---
+title: "Project"
+output: html_document
+date: '2022-06-18'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(data.table)
+setwd("~/IIT/Data Prep & Analysis/Project/")
+
+df <- fread("CIS.csv")
+
+df$timeInLot <- df$lastSeen - df$firstSeen
+df <- subset(df, select = -c(vin, firstSeen, lastSeen, stockNum, interiorColor, color, vf_ABS, vf_AdaptiveHeadlights, vf_AdditionalErrorText, vf_AirBagLocSeatCushion, vf_AutomaticPedestrianAlertingSound, vf_AxleConfiguration, vf_Axles, vf_BatteryA, vf_BatteryA_to, vf_BatteryCells, vf_BatteryInfo, vf_BatteryKWh, vf_BatteryKWh_to, vf_BatteryModules, vf_BatteryPacks, vf_BatteryType, vf_BatteryV, vf_BatteryV_to, vf_BedLengthIN, vf_BrakeSystemDesc, vf_BusFloorConfigType, vf_BusLength, vf_BusType, vf_CashForClunkers, vf_ChargerLevel, vf_ChargerPowerKW, vf_CoolingType, vf_CurbWeightLB, vf_CustomMotorcycleType, vf_DestinationMarket, vf_DriverAssist, vf_EDR, vf_ElectrificationLevel, vf_ESC, vf_EngineCycles, vf_EngineHP_to, vf_EntertainmentSystem, vf_EVDriveUnit, vf_FuelTypeSecondary, vf_GCWR, vf_GCWR_to, vf_GVWR_to, vf_LowerBeamHeadlampLightSource, vf_MotorcycleChassisType, vf_MotorcycleSuspensionType, vf_NCSABodyType, vf_NCSAMake, vf_NCSAMapExcApprovedBy, vf_NCSAMapExcApprovedOn, vf_NCSAMappingException, vf_NCSAModel, vf_NCSANote, vf_OtherBusInfo, vf_OtherTrailerInfo, vf_OtherMotorcycleInfo, vf_ParkAssist,  vf_PossibleValues, vf_Pretensioner, vf_RearCrossTrafficAlert, vf_SAEAutomationLevel, vf_SAEAutomationLevel_to, vf_Series2,  vf_SuggestedVIN, vf_TrackWidth, vf_TrailerBodyType, vf_TrailerLength, vf_TrailerType, vf_Trim2, vf_VIN, vf_WheelBaseLong, vf_WheelBaseType, vf_Windows))
+
+df$msrp[df$msrp==0] <- NA
+df <- df[!is.na(df$msrp), ]
+
+df <- filter(df, timeInLot >= 0)
+df <- filter(df, mileage < 9999999)
+
+df[, names(df) := replace(.SD, .SD == "", NA), .SDcols = names(df)]
+
+fwrite(df, "cars.csv", row.names = F, quote = F)
+```
+
+```{r}
+df
+```
+
+```{r}
+head(df)
+str(df)
+summary(df)
+```
+
+```{r}
+#Q1
+df <- fread("cars.csv", na.strings = c("",NA), stringsAsFactors = T)
+set.seed(1234)
+#sort((colMeans(is.na(df)))*100)
+#df[, names(df) := lapply(.SD, as.numeric), .SDcols = names(df)]
+
+for(k in names(df)){
+         
+      if(is.numeric(df[[k]]) | is.integer(df[[k]])){
+
+        # impute numeric variables with median
+        mean <- round(mean(df[[k]],na.rm = T))
+        set(x = df, which(is.na(df[[k]])), k, mean)
+        
+    } else if(is.factor(df[[k]])){
+
+        ## impute categorical variables with mode
+        mode <- names(which.max(table(df[[k]])))
+        set(x = df, which(is.na(df[[k]])), k, mode)
+    }
+}
+
+#summary(df)
+
+# library(corrplot)
+# res <- cor(df, use = "pairwise.complete.obs")
+
+#Linear model
+q1 <- data.frame("timeInLot" = df$timeInLot, "msrp" = df$msrp, "mileage" = df$mileage, "isNew" = df$isNew)
+trainIndex <- createDataPartition(q1$timeInLot, p = 0.8, times = 1, list = FALSE)
+q1_train <- q1[trainIndex, ]
+q1_test <- q1[-trainIndex, ]
+
+# test <- lm(timeInLot ~ ., df)
+
+model <- train(
+  timeInLot ~ ., q1,
+  method = "lm",
+  trControl = trainControl(
+    method = "cv", number = 10,
+    verboseIter = TRUE
+  )
+)
+summary(model)
+
+trainIndex <- createDataPartition(df$timeInLot, p = 0.8, times = 1, list = FALSE)
+df_train <- df[trainIndex, ]
+df_test <- df[-trainIndex, ]
+
+library(biglasso)
+lasso.fit <- biglasso(X = as.big.matrix(df[, -79]), y = df$timeInLot, family = "gaussian", penalty = "lasso", alpha = 1, safe.thresh = 0.01)
+plot(lasso.fit, log.l = TRUE, main = 'lasso')
+lasso.pred <- predict(lasso.fit, as.big.matrix(df_test[, -79]), type = "response", lambda = 0.5)
+
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- 1 - SSE / SST
+  RMSE = sqrt(SSE/nrow(df))
+  data.frame(RMSE = RMSE, Rsquare = R_square)
+}
+lasso.train.pred <- predict(lasso.fit, as.big.matrix(df_train[, -79]), type = "response", lambda = 0.5)
+train_error <- eval_results(df_train$timeInLot, lasso.train.pred, df_train)
+
+lasso.test.pred <- predict(lasso.fit, as.big.matrix(df_test[, -79]), type = "response", lambda = 0.5)
+test_error <- eval_results(df_test$timeInLot, lasso.test.pred, df_test)
+test_error$Rsquare
+
+library(leaps)
+regfit.fwd <- regsubsets(x = timeInLot ~ ., data = df, nvmax = 10, method = "forward", really.big = T)
+summary(regfit.fwd)
+coef(regfit.fwd, 1:3)
+vcov(regfit.fwd, 3)
+
+library(randomForest)
+rf <- randomForest(formula = timeInLot ~ ., data = df_train)
+```
+
+## Q-2 ---------------------------------------------------
+```{r}
+df$car <- paste(df$brandName, df$modelName, sep =" ")
+counts <- df %>% 
+  group_by(df$car) %>%
+  summarize(Count=n()) %>%
+  mutate(Percent = (Count/sum(Count)*100)) %>%
+  arrange(desc(Count))
+
+counts
+```
+
+```{r}
+df1 <- (head(counts, 10))
+df1
+
+df2 <- sort(table(df$car))
+df3 <- tail(df2, 10)
+pie(df3)
+```
+
+##Q-3 -------------------------------------------------------------------------
+```{r}
+summary(na.omit(df$vf_AirBagLocFront))
+summary(na.omit(df$vf_AdaptiveCruiseControl))
+summary(na.omit(df$vf_AirBagLocSide))
+```
+
+```{r}
+#Q4
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(caret)
+library(data.table)
+setwd("~/IIT/Data Prep & Analysis/Project/")
+df <- fread("cars.csv", na.strings = c("",NA), stringsAsFactors = T)
+set.seed(1234)
+df <- subset(df, select = -c(timeInLot))
+
+for(k in names(df)){
+         
+      if(is.numeric(df[[k]]) | is.integer(df[[k]])){
+
+        # impute numeric variables with median
+        mean <- round(mean(df[[k]],na.rm = T))
+        set(x = df, which(is.na(df[[k]])), k, mean)
+        
+    } else if(is.factor(df[[k]])){
+
+        ## impute categorical variables with mode
+        mode <- names(which.max(table(df[[k]])))
+        set(x = df, which(is.na(df[[k]])), k, mode)
+    }
+}
+
+
+q1 <- data.frame("askPrice" = df$askPrice, "mileage" = df$mileage, "isNew" = df$isNew)
+trainIndex <- createDataPartition(q1$msrp, p = 0.8, times = 1, list = FALSE)
+q1_train <- q1[trainIndex, ]
+q1_test <- q1[-trainIndex, ]
+
+model <- train(
+  askPrice ~ ., q1,
+  method = "lm",
+  trControl = trainControl(
+    method = "cv", number = 10,
+    verboseIter = TRUE
+  )
+)
+summary(model)
+summary(q1.pred)
+hist(q1$timeInLot) #lots of cars are only here for a day
+
+trainIndex <- createDataPartition(df$msrp, p = 0.8, times = 1, list = FALSE)
+df_train <- df[trainIndex, ]
+df_test <- df[-trainIndex, ]
+
+library(biglasso)
+lasso.fit <- biglasso(X = as.big.matrix(df_train[, -1]), y = df_train$msrp, family = "gaussian", penalty = "lasso", alpha = 1, safe.thresh = 0.01)
+plot(lasso.fit, log.l = TRUE, main = 'lasso')
+lasso.pred <- predict(lasso.fit, as.big.matrix(df_test[, -1]), type = "response", lambda = 0.5)
+
+eval_results <- function(true, predicted, df) {
+  SSE <- sum((predicted - true)^2)
+  SST <- sum((true - mean(true))^2)
+  R_square <- 1 - SSE / SST
+  RMSE = sqrt(SSE/nrow(df))
+  data.frame(RMSE = RMSE, Rsquare = R_square)
+}
+lasso.train.pred <- predict(lasso.fit, as.big.matrix(df_train[, -1]), type = "response", lambda = 0.5)
+train_error <- eval_results(df_train$msrp, lasso.train.pred, df_train)
+
+lasso.test.pred <- predict(lasso.fit, as.big.matrix(df_test[, -1]), type = "response", lambda = 0.5)
+test_error <- eval_results(df_test$msrp, lasso.test.pred, df_test)
+test_error$Rsquare
+```
+
+##Q-5 -------------------------------------
+```{r}
+summary(df$msrp)
+summary(df$askPrice)
+```
+```{r}
+q1 <- quantile(df$msrp, 0.99)
+q2 <- quantile(df$msrp, 0.01)
+df$msrp[df$msrp > q1] <- NA
+df$msrp[df$msrp < q2] <- NA
+
+q3 <- quantile(df$askPrice, 0.99)
+q4 <- quantile(df$askPrice, 0.01)
+df$askPrice[df$askPrice > q1] <- NA
+df$askPrice[df$askPrice < q2] <- NA
+boxplot(df$msrp, df$askPrice)
+```
+```{r}
+price_diff <- df$msrp - df$askPrice
+summary(price_diff)
+```
+
+```{r}
+cor(df$msrp, df$askPrice, use = "complete.obs")
+model = lm(df$msrp ~ df$askPrice, data = df )
+model
+```
+
+```{r}
+summary(model)
+```
+
+```{r}
+plot(model, col= "yellow")
+abline(model, col="red")
+```
